@@ -2,7 +2,7 @@ mod directory_storage;
 mod mem_table;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use std::io::{Cursor, Error as IoError, ErrorKind as IoErrorKind, Read};
+use std::io::{Cursor, Error as IoError, ErrorKind as IoErrorKind, Read, Write};
 use tracing::info;
 
 pub use directory_storage::DirectoryStorage;
@@ -69,6 +69,85 @@ pub trait Storage {
     fn append(&self, key: &str) -> Result<Self::Appender, IoError>;
     fn delete(&self, key: &str) -> Result<(), IoError>;
     fn list(&self) -> Result<Vec<String>, IoError>;
+}
+
+struct SSTableReader<R: ReadAt> {
+    file: R,
+    size: usize,
+}
+
+impl<R: ReadAt> SSTableReader<R> {
+    fn open(file: R) -> Result<SSTableReader<R>, IoError> {
+        let mut size_buf = [0u8; 4];
+        file.read_exact_at(&mut size_buf, 0)?;
+        let size = Cursor::new(&size_buf).read_u32::<BigEndian>()? as usize;
+        Ok(SSTableReader {
+            file,
+            size,
+        })
+    }
+
+    fn get(&self, key: &[u8]) -> Result<Option<&[u8]>, IoError> {
+        // Binary search
+        let mut size = self.size;
+        if size == 0 {
+            return Ok(None);
+        }
+        let mut base = 0;
+
+        let section_index = 4;
+        let section_entries = 4 + self.size as u64 * 8;
+
+        while size > 1 {
+            let half = size / 2;
+            let mid_index = base + half;
+
+            let mut mid_offset_buf = [0u8; 8];
+            self.file.read_exact_at(
+                &mut mid_offset_buf,
+                section_index + mid_index as u64 * 8,
+            )?;
+            let mid_offset = Cursor::new(&mid_offset_buf).read_u64::<BigEndian>().unwrap();
+
+            let mut mid_key_len_buf = [0u8; 4];
+            self.file.read_exact_at(
+                &mut mid_key_len_buf,
+                section_entries + mid_offset,
+            )?;
+            let mid_key_len = Cursor::new(&mid_key_len_buf).read_u32::<BigEndian>().unwrap();
+
+            let mut mid = vec![0u8; mid_key_len as usize];
+            self.file.read_exact_at(
+                &mut mid,
+                section_entries + mid_offset + 4,
+            )?;
+
+            if &mid as &[u8] < key {
+                base = mid_index;
+            }
+
+            size -= half;
+        }
+
+        todo!()
+    }
+}
+
+fn write_sstable(entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+    let mut result = Cursor::new(Vec::new());
+    result.write_u32::<BigEndian>(entries.len() as u32).unwrap();
+    let mut offset = 0;
+    for entry in entries {
+        result.write_u64::<BigEndian>(offset).unwrap();
+        offset += 4 + entry.0.len() as u64 + 4 + entry.1.len() as u64;
+    }
+    for entry in entries {
+        result.write_u32::<BigEndian>(entry.0.len() as u32).unwrap();
+        result.write_all(&entry.0).unwrap();
+        result.write_u32::<BigEndian>(entry.1.len() as u32).unwrap();
+        result.write_all(&entry.1).unwrap();
+    }
+    result.into_inner()
 }
 
 pub struct Database<S: Storage> {
