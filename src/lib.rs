@@ -9,9 +9,28 @@ pub use directory_storage::DirectoryStorage;
 use mem_table::MemTable;
 // TODO: SingleFileStorage
 
+#[derive(Debug)]
 pub enum Error {
     IoError(IoError),
     InvalidDatabase(String),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::IoError(err) => write!(f, "I/O error: {}", err),
+            Error::InvalidDatabase(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::IoError(err) => Some(err),
+            Error::InvalidDatabase(_) => None,
+        }
+    }
 }
 
 impl From<IoError> for Error {
