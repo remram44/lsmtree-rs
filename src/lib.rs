@@ -195,3 +195,62 @@ enum Operation {
     Put,
     Delete,
 }
+
+#[cfg(test)]
+mod tests {
+    use tempdir::TempDir;
+
+    use crate::{Database, DirectoryStorage};
+
+    fn v(s: &[u8]) -> Vec<u8> {
+        s.into()
+    }
+
+    #[test]
+    fn test_database() {
+        let dir = TempDir::new("lsmtree-test").unwrap();
+        let storage = DirectoryStorage::new(dir.path()).unwrap();
+        let mut db = Database::open(storage).unwrap();
+
+        db.put(b"ghi", b"111").unwrap();
+        db.put(b"abc", b"222").unwrap();
+        db.put(b"mno", b"333").unwrap();
+        db.put(b"ghi", b"444").unwrap();
+        db.put(b"def", b"555").unwrap();
+        db.put(b"jkl", b"666").unwrap();
+        db.put(b"def", b"777").unwrap();
+        db.delete(b"ghi").unwrap();
+
+        assert_eq!(db.get(b"abc").unwrap(), Some(v(b"222")));
+        assert_eq!(db.get(b"def").unwrap(), Some(v(b"777")));
+        assert_eq!(db.get(b"ghi").unwrap(), None);
+        assert_eq!(db.get(b"jkl").unwrap(), Some(v(b"666")));
+        assert_eq!(db.get(b"mno").unwrap(), Some(v(b"333")));
+        assert_eq!(db.get(b"zzz").unwrap(), None);
+
+        assert_eq!(
+            db.iter_range(b"def", b"jkl").collect::<Vec<_>>(),
+            vec![
+                (v(b"def"), v(b"777")),
+            ],
+        );
+
+        assert_eq!(
+            db.iter_range(b"a", b"jz").collect::<Vec<_>>(),
+            vec![
+                (v(b"abc"), v(b"222")),
+                (v(b"def"), v(b"777")),
+                (v(b"jkl"), v(b"666")),
+            ],
+        );
+
+        assert_eq!(
+            db.iter_range(b"def", b"z").collect::<Vec<_>>(),
+            vec![
+                (v(b"def"), v(b"777")),
+                (v(b"jkl"), v(b"666")),
+                (v(b"mno"), v(b"333")),
+            ],
+        );
+    }
+}
