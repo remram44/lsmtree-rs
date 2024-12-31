@@ -1,10 +1,12 @@
 mod directory_storage;
+mod mem_table;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Error as IoError, ErrorKind as IoErrorKind, Read, Seek};
 use tracing::info;
 
 pub use directory_storage::DirectoryStorage;
+use mem_table::MemTable;
 // TODO: SingleFileStorage
 
 pub enum Error {
@@ -38,78 +40,6 @@ pub trait Storage {
     fn append(&self, key: &str) -> Result<Self::Appender, IoError>;
     fn delete(&self, key: &str) -> Result<(), IoError>;
     fn list(&self) -> Result<Vec<String>, IoError>;
-}
-
-#[derive(Default)]
-struct MemTable {
-    entries: Vec<(Vec<u8>, Vec<u8>)>,
-}
-
-impl MemTable {
-    fn put(&mut self, key: &[u8], value: Vec<u8>) {
-        match self.entries.binary_search_by_key(&key, |(key, _value)| key) {
-            Ok(index) => {
-                // There is an element with that key, update its value
-                self.entries[index].1 = value;
-            }
-            Err(index) => {
-                // There is no element with that key, insert
-                self.entries.insert(index, (key.into(), value));
-            }
-        }
-    }
-
-    fn delete(&mut self, key: &[u8]) -> bool {
-        match self.entries.binary_search_by_key(&key, |(key, _value)| key) {
-            Ok(index) => {
-                // There is an element with that key, update its value
-                self.entries.remove(index);
-                true
-            }
-            Err(_) => false,
-        }
-    }
-
-    fn get(&self, key: &[u8]) -> Option<&[u8]> {
-        match self.entries.binary_search_by_key(&key, |(key, _value)| key) {
-            Ok(index) => Some(&self.entries[index].1),
-            Err(_) => None,
-        }
-    }
-
-    fn iter_range<'a>(&'a self, key_start: &'a [u8], key_end: &'a [u8]) -> MemTableRangeIterator<'a> {
-        let index = self.entries.partition_point(|(key, _value)| key as &[u8] < key_start);
-        MemTableRangeIterator {
-            mem_table: self,
-            next_index: index,
-            key_end,
-        }
-    }
-}
-
-struct MemTableRangeIterator<'a> {
-    mem_table: &'a MemTable,
-    next_index: usize,
-    key_end: &'a [u8],
-}
-
-impl<'a> Iterator for MemTableRangeIterator<'a> {
-    type Item = &'a (Vec<u8>, Vec<u8>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.next_index >= self.mem_table.entries.len() {
-            None
-        } else {
-            let entry = &self.mem_table.entries[self.next_index];
-            if &entry.0 as &[u8] < self.key_end {
-                self.next_index += 1;
-                Some(entry)
-            } else {
-                self.next_index = self.mem_table.entries.len();
-                None
-            }
-        }
-    }
 }
 
 pub struct Database<S: Storage> {
