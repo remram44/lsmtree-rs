@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{Error as IoError, ErrorKind as IoErrorKind, Write};
 use std::path::PathBuf;
-use crate::{Append, Storage};
+use crate::{Append, ReadAt, Storage};
 
 pub struct DirectoryStorage {
     path: PathBuf,
@@ -28,12 +28,20 @@ impl DirectoryStorage {
     }
 }
 
+pub struct FileReader(File);
+
+impl ReadAt for FileReader {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<(), IoError> {
+        std::os::unix::fs::FileExt::read_exact_at(&self.0, buf, offset)
+    }
+}
+
 impl Storage for DirectoryStorage {
-    type Reader = File;
+    type Reader = FileReader;
     type Appender = DirectoryFileAppender;
 
-    fn read(&self, key: &str) -> Result<File, IoError> {
-        File::open(self.path.join(key))
+    fn read(&self, key: &str) -> Result<FileReader, IoError> {
+        Ok(FileReader(File::open(self.path.join(key))?))
     }
 
     fn write(&self, key: &str, value: &[u8]) -> Result<(), IoError> {

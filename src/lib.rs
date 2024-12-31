@@ -2,7 +2,7 @@ mod directory_storage;
 mod mem_table;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use std::io::{Cursor, Error as IoError, ErrorKind as IoErrorKind, Read, Seek};
+use std::io::{Cursor, Error as IoError, ErrorKind as IoErrorKind, Read};
 use tracing::info;
 
 pub use directory_storage::DirectoryStorage;
@@ -50,8 +50,18 @@ impl<A: Append> Append for &mut A {
     }
 }
 
+pub trait ReadAt {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<(), IoError>;
+}
+
+impl<R: ReadAt> ReadAt for &R {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<(), IoError> {
+        (*self).read_exact_at(buf, offset)
+    }
+}
+
 pub trait Storage {
-    type Reader: Read + Seek;
+    type Reader: ReadAt;
     type Appender: Append;
 
     fn read(&self, key: &str) -> Result<Self::Reader, IoError>;
@@ -67,10 +77,14 @@ pub struct Database<S: Storage> {
     wal: S::Appender,
 }
 
-fn read_vec<R: Read>(mut file: R) -> Result<Vec<u8>, IoError> {
-    let len = file.read_u32::<BigEndian>()?;
+fn read_vec<R: ReadAt>(file: R, offset: &mut u64) -> Result<Vec<u8>, IoError> {
+    let mut len_buf = [0u8; 4];
+    file.read_exact_at(&mut len_buf, *offset)?;
+    *offset += 4;
+    let len = Cursor::new(&len_buf).read_u32::<BigEndian>().unwrap();
     let mut vec = vec![0u8; len as usize];
-    file.read_exact(&mut vec)?;
+    file.read_exact_at(&mut vec, *offset)?;
+    *offset += len as u64;
     Ok(vec)
 }
 
@@ -107,19 +121,24 @@ impl<S: Storage> Database<S> {
             // Open existing database
             info!("Opening existing database, replaying WAL");
             let mut entries = 0;
-            let mut wal = storage.read("wal")?;
+            let wal = storage.read("wal")?;
+            let mut offset = 0;
             loop {
-                let op = match wal.read_u8() {
-                    Ok(0) => Operation::Put,
-                    Ok(1) => Operation::Delete,
-                    Ok(_) => return Err(Error::InvalidDatabase("Invalid WAL entry type".into())),
+                let mut op_buf = [0u8];
+                let op = match wal.read_exact_at(&mut op_buf, offset) {
                     Err(e) if e.kind() == IoErrorKind::UnexpectedEof => break,
                     Err(e) => return Err(e.into()),
+                    Ok(()) => match op_buf[0] {
+                        0 => Operation::Put,
+                        1 => Operation::Delete,
+                        _ => return Err(Error::InvalidDatabase("Invalid WAL entry type".into())),
+                    }
                 };
-                let key = read_vec(&mut wal)?;
+                offset += 1;
+                let key = read_vec(&wal, &mut offset)?;
                 match op {
                     Operation::Put => {
-                        let value = read_vec(&mut wal)?;
+                        let value = read_vec(&wal, &mut offset)?;
                         mem_table.put(&key, value);
                     }
                     Operation::Delete => {
