@@ -177,6 +177,11 @@ impl<S: Storage> Database<S> {
             database: self,
         }
     }
+
+    pub fn maintain(&mut self) -> Result<(), IoError> {
+        // TODO: Merge tables
+        Ok(())
+    }
 }
 
 pub struct RangeIterator<'a, S: Storage> {
@@ -212,14 +217,20 @@ mod tests {
         let storage = DirectoryStorage::new(dir.path()).unwrap();
         let mut db = Database::open(storage).unwrap();
 
-        db.put(b"ghi", b"111").unwrap();
-        db.put(b"abc", b"222").unwrap();
-        db.put(b"mno", b"333").unwrap();
-        db.put(b"ghi", b"444").unwrap();
-        db.put(b"def", b"555").unwrap();
-        db.put(b"jkl", b"666").unwrap();
-        db.put(b"def", b"777").unwrap();
-        db.delete(b"ghi").unwrap();
+        fn check(db: &mut Database<DirectoryStorage>) {
+            db.put(b"ghi", b"111").unwrap();
+            db.put(b"abc", b"222").unwrap();
+            db.put(b"mno", b"333").unwrap();
+            db.put(b"ghi", b"444").unwrap();
+            db.put(b"def", b"555").unwrap();
+            db.put(b"jkl", b"666").unwrap();
+            db.put(b"def", b"777").unwrap();
+            db.delete(b"ghi").unwrap();
+        }
+        check(&mut db);
+
+        db.maintain().unwrap();
+        check(&mut db);
 
         assert_eq!(db.get(b"abc").unwrap(), Some(v(b"222")));
         assert_eq!(db.get(b"def").unwrap(), Some(v(b"777")));
