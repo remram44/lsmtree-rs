@@ -54,7 +54,11 @@ impl Storage for DirectoryStorage {
     }
 
     fn delete(&self, key: &str) -> Result<(), IoError> {
-        std::fs::remove_file(self.path.join(key))
+        match std::fs::remove_file(self.path.join(key)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == IoErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     fn list(&self) -> Result<Vec<String>, IoError> {
