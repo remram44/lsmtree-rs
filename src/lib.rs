@@ -184,6 +184,25 @@ impl<R: ReadAt> SSTableReader<R> {
             Ok(None)
         }
     }
+
+    fn iter_range<'a>(&self, key_start: &'a [u8], key_end: &'a [u8]) -> SSTableRangeIterator<'a, R> {
+        todo!()
+    }
+}
+
+struct SSTableRangeIterator<'a, R: ReadAt> {
+    sstable: &'a SSTableReader<R>,
+    key_start: &'a [u8],
+    key_end: &'a [u8],
+    current_offset: u64,
+}
+
+impl<'a, R: ReadAt> Iterator for SSTableRangeIterator<'a, R> {
+    type Item = Result<(Vec<u8>, Vec<u8>), IoError>;
+
+    fn next(&mut self) -> Option<Result<(Vec<u8>, Vec<u8>), IoError>> {
+        todo!()
+    }
 }
 
 fn write_sstable(entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
