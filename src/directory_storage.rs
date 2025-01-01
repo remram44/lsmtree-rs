@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{Error as IoError, ErrorKind as IoErrorKind, Write};
+use std::io::{Error as IoError, ErrorKind as IoErrorKind, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use crate::{Append, ReadAt, Storage};
 
@@ -12,6 +12,11 @@ pub struct DirectoryFileAppender(File);
 impl Append for DirectoryFileAppender {
     fn append(&mut self, buffer: &[u8]) -> Result<(), IoError> {
         self.0.write_all(buffer)
+    }
+
+    fn truncate(&mut self) -> Result<(), IoError> {
+        self.0.seek(SeekFrom::Start(0))?;
+        self.0.set_len(0)
     }
 }
 

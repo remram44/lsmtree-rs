@@ -1,6 +1,6 @@
 #[derive(Default)]
 pub(crate) struct MemTable {
-    entries: Vec<(Vec<u8>, Vec<u8>)>,
+    pub(crate) entries: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl MemTable {

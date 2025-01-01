@@ -2,7 +2,8 @@ mod directory_storage;
 mod mem_table;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use std::io::{Cursor, Error as IoError, ErrorKind as IoErrorKind, Read, Write};
+use std::collections::HashSet;
+use std::io::{Cursor, Error as IoError, ErrorKind as IoErrorKind, Write};
 use tracing::info;
 
 pub use directory_storage::DirectoryStorage;
@@ -42,11 +43,16 @@ impl From<IoError> for Error {
 /// File-like trait to append to a file in storage, used for WAL.
 pub trait Append {
     fn append(&mut self, buffer: &[u8]) -> Result<(), IoError>;
+    fn truncate(&mut self) -> Result<(), IoError>;
 }
 
 impl<A: Append> Append for &mut A {
     fn append(&mut self, buffer: &[u8]) -> Result<(), IoError> {
         (*self).append(buffer)
+    }
+
+    fn truncate(&mut self) -> Result<(), IoError> {
+        (*self).truncate()
     }
 }
 
@@ -87,7 +93,7 @@ impl<R: ReadAt> SSTableReader<R> {
         })
     }
 
-    fn get(&self, key: &[u8]) -> Result<Option<&[u8]>, IoError> {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, IoError> {
         // Binary search
         let mut size = self.size;
         if size == 0 {
@@ -122,14 +128,28 @@ impl<R: ReadAt> SSTableReader<R> {
                 section_entries + mid_offset + 4,
             )?;
 
-            if &mid as &[u8] < key {
+            if &mid as &[u8] == key {
+                let mut value_len_buf = [0u8; 4];
+                self.file.read_exact_at(
+                    &mut value_len_buf,
+                    section_entries + mid_offset + 4 + mid_key_len as u64,
+                )?;
+                let value_len = Cursor::new(&value_len_buf).read_u32::<BigEndian>().unwrap();
+
+                let mut value = vec![0u8; value_len as usize];
+                self.file.read_exact_at(
+                    &mut value,
+                    section_entries + mid_offset + 4 + mid_key_len as u64 + 4,
+                )?;
+                return Ok(Some(value));
+            } else if &mid as &[u8] < key {
                 base = mid_index;
             }
 
             size -= half;
         }
 
-        todo!()
+        Ok(None)
     }
 }
 
@@ -152,6 +172,7 @@ fn write_sstable(entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
 
 pub struct Database<S: Storage> {
     storage: S,
+    sstables: Vec<((u32, u32), SSTableReader<S::Reader>)>,
     mem_table: MemTable,
     wal: S::Appender,
 }
@@ -178,20 +199,21 @@ fn write_vec<A: Append>(mut file: A, buf: &[u8]) -> Result<(), IoError> {
 impl<S: Storage> Database<S> {
     pub fn open(storage: S) -> Result<Database<S>, Error> {
         let mut wal_found = false;
-        let mut tables_found = false;
+        let mut sstable_names = Vec::new();
         for entry in storage.list()? {
             if &entry == "wal" {
                 wal_found = true;
             } else if entry.ends_with(".sst") {
-                tables_found = true;
+                sstable_names.push(entry);
             } else {
                 return Err(Error::InvalidDatabase("Unexpected file in storage".into()));
             }
         }
 
         let mut mem_table: MemTable = Default::default();
+        let mut sstables = Vec::new();
 
-        if !wal_found && tables_found {
+        if !wal_found && sstable_names.len() > 0 {
             return Err(Error::InvalidDatabase("Missing wal".into()));
         } else if !wal_found {
             // Initialize new empty database
@@ -200,6 +222,7 @@ impl<S: Storage> Database<S> {
             // Open existing database
             info!("Opening existing database, replaying WAL");
             let mut entries = 0;
+            let mut incomplete_sstables = HashSet::new();
             let wal = storage.read("wal")?;
             let mut offset = 0;
             loop {
@@ -210,6 +233,8 @@ impl<S: Storage> Database<S> {
                     Ok(()) => match op_buf[0] {
                         0 => Operation::Put,
                         1 => Operation::Delete,
+                        2 => Operation::WriteSstableStart,
+                        3 => Operation::WriteSstableEnd,
                         _ => return Err(Error::InvalidDatabase("Invalid WAL entry type".into())),
                     }
                 };
@@ -223,14 +248,48 @@ impl<S: Storage> Database<S> {
                     Operation::Delete => {
                         mem_table.delete(&key);
                     }
+                    Operation::WriteSstableStart => {
+                        let table_name = read_vec(&wal, &mut offset)?;
+                        let table_name = String::from_utf8(table_name)
+                            .map_err(|_| ())
+                            .and_then(|n| if n.is_ascii() { Ok(n) } else { Err(()) })
+                            .map_err(|_| Error::InvalidDatabase("Invalid table name in WAL".into()))?;
+                        incomplete_sstables.insert(table_name);
+                    }
+                    Operation::WriteSstableEnd => {
+                        let table_name = read_vec(&wal, &mut offset)?;
+                        let table_name = String::from_utf8(table_name)
+                            .map_err(|_| ())
+                            .and_then(|n| if n.is_ascii() { Ok(n) } else { Err(()) })
+                            .map_err(|_| Error::InvalidDatabase("Invalid table name in WAL".into()))?;
+                        incomplete_sstables.remove(&table_name);
+                    }
                 }
                 entries += 1;
             }
+
+            // Remove incomplete sstables
+            info!("{} incomplete sstables to delete", incomplete_sstables.len());
+            for sstable in &incomplete_sstables {
+                storage.delete(&sstable)?;
+            }
+
+            // Open remaining sstables
+            for name in sstable_names {
+                if !incomplete_sstables.contains(&name) {
+                    let reader = storage.read(&name)?;
+                    let table = SSTableReader::open(reader)?;
+                    let id = parse_sstable_name(&name).map_err(|_| Error::InvalidDatabase("Invalid sstable name".into()))?;
+                    sstables.push((id, table));
+                }
+            }
+
             info!("Replayed {} WAL entries", entries);
         }
         let wal = storage.append("wal")?;
         Ok(Database {
             storage,
+            sstables,
             mem_table,
             wal,
         })
@@ -254,7 +313,12 @@ impl<S: Storage> Database<S> {
             return Ok(Some(value.into()));
         }
 
-        // TODO: Read from sstables
+        // Read from sstables
+        for (_, sstable) in self.sstables.iter().rev() {
+            if let Some(value) = sstable.get(key)? {
+                return Ok(Some(value));
+            }
+        }
 
         Ok(None)
     }
@@ -278,6 +342,39 @@ impl<S: Storage> Database<S> {
 
     pub fn maintain(&mut self) -> Result<(), IoError> {
         // TODO: Merge tables
+
+        // Write memtable to disk
+        let mut new_id = 0;
+        for &((level, id), _) in &self.sstables {
+            if level == 0 {
+                if id >= new_id {
+                    new_id = id + 1;
+                }
+            }
+        }
+        let new_name = format!("1-{}.sst", new_id);
+        info!("Writing memtable to new sstable '{}'", new_name);
+
+        self.wal.append(&[2])?;
+        write_vec(&mut self.wal, new_name.as_bytes())?;
+
+        let buf = write_sstable(&self.mem_table.entries);
+        self.storage.write(&new_name, &buf)?;
+
+        self.wal.append(&[3])?;
+        write_vec(&mut self.wal, new_name.as_bytes())?;
+        info!("New sstable write complete");
+
+        // Open new memtable
+        let reader = self.storage.read(&new_name)?;
+        let table = SSTableReader::open(reader)?;
+        let index = self.sstables.partition_point(|&(k, _)| k > (1, new_id));
+        self.sstables.insert(index, ((1, new_id), table));
+
+        // Truncate WAL
+        info!("Truncating WAL");
+        self.wal.truncate()?;
+
         Ok(())
     }
 }
@@ -297,6 +394,35 @@ impl<'a, S: Storage> Iterator for RangeIterator<'a, S> {
 enum Operation {
     Put,
     Delete,
+    WriteSstableStart,
+    WriteSstableEnd,
+}
+
+fn parse_sstable_name(name: &str) -> Result<(u32, u32), ()> {
+    let Some(dash) = name.find('-') else {
+        return Err(());
+    };
+    let level = name[0..dash].parse().map_err(|_| ())?;
+    let dot = match name[dash+1..].find('.') {
+        Some(i) => dash + 1 + i,
+        None => return Err(()),
+    };
+    let id = name[dash+1..dot].parse().map_err(|_| ())?;
+    if &name[dot..] != ".sst" {
+        return Err(());
+    }
+    Ok((level, id))
+}
+
+#[test]
+fn test_parse_sstable_name() {
+    assert_eq!(parse_sstable_name("1-0.sst"), Ok((1, 0)));
+    assert_eq!(parse_sstable_name("123-456.sst"), Ok((123, 456)));
+    assert_eq!(parse_sstable_name(""), Err(()));
+    assert_eq!(parse_sstable_name("-0.sst"), Err(()));
+    assert_eq!(parse_sstable_name("1-.sst"), Err(()));
+    assert_eq!(parse_sstable_name("1-0."), Err(()));
+    assert_eq!(parse_sstable_name("1-0"), Err(()));
 }
 
 #[cfg(test)]
