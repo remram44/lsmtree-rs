@@ -1,7 +1,7 @@
 mod directory_storage;
 mod mem_table;
 
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use std::collections::HashSet;
 use std::io::{Cursor, Error as IoError, ErrorKind as IoErrorKind, Write};
 use tracing::info;
@@ -66,6 +66,18 @@ impl<R: ReadAt> ReadAt for &R {
     }
 }
 
+fn read_u64(buf: &[u8]) -> u64 {
+    use byteorder::{BigEndian, ByteOrder};
+
+    BigEndian::read_u64(buf)
+}
+
+fn read_u32(buf: &[u8]) -> u32 {
+    use byteorder::{BigEndian, ByteOrder};
+
+    BigEndian::read_u32(buf)
+}
+
 pub trait Storage {
     type Reader: ReadAt;
     type Appender: Append;
@@ -86,7 +98,7 @@ impl<R: ReadAt> SSTableReader<R> {
     fn open(file: R) -> Result<SSTableReader<R>, IoError> {
         let mut size_buf = [0u8; 4];
         file.read_exact_at(&mut size_buf, 0)?;
-        let size = Cursor::new(&size_buf).read_u32::<BigEndian>()? as usize;
+        let size = read_u32(&size_buf) as usize;
         Ok(SSTableReader {
             file,
             size,
@@ -113,14 +125,14 @@ impl<R: ReadAt> SSTableReader<R> {
                 &mut mid_offset_buf,
                 section_index + mid_index as u64 * 8,
             )?;
-            let mid_offset = Cursor::new(&mid_offset_buf).read_u64::<BigEndian>().unwrap();
+            let mid_offset = read_u64(&mid_offset_buf);
 
             let mut mid_key_len_buf = [0u8; 4];
             self.file.read_exact_at(
                 &mut mid_key_len_buf,
                 section_entries + mid_offset,
             )?;
-            let mid_key_len = Cursor::new(&mid_key_len_buf).read_u32::<BigEndian>().unwrap();
+            let mid_key_len = read_u32(&mid_key_len_buf);
 
             let mut mid = vec![0u8; mid_key_len as usize];
             self.file.read_exact_at(
@@ -134,7 +146,7 @@ impl<R: ReadAt> SSTableReader<R> {
                     &mut value_len_buf,
                     section_entries + mid_offset + 4 + mid_key_len as u64,
                 )?;
-                let value_len = Cursor::new(&value_len_buf).read_u32::<BigEndian>().unwrap();
+                let value_len = read_u32(&value_len_buf);
 
                 let mut value = vec![0u8; value_len as usize];
                 self.file.read_exact_at(
@@ -181,7 +193,7 @@ fn read_vec<R: ReadAt>(file: R, offset: &mut u64) -> Result<Vec<u8>, IoError> {
     let mut len_buf = [0u8; 4];
     file.read_exact_at(&mut len_buf, *offset)?;
     *offset += 4;
-    let len = Cursor::new(&len_buf).read_u32::<BigEndian>().unwrap();
+    let len = read_u32(&len_buf);
     let mut vec = vec![0u8; len as usize];
     file.read_exact_at(&mut vec, *offset)?;
     *offset += len as u64;
