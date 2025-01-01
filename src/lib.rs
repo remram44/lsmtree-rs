@@ -437,6 +437,10 @@ mod tests {
 
     #[test]
     fn test_database() {
+        pretty_env_logger::formatted_timed_builder()
+            .parse_filters("info")
+            .try_init().unwrap();
+
         let dir = TempDir::new("lsmtree-test").unwrap();
         let storage = DirectoryStorage::new(dir.path()).unwrap();
         let mut db = Database::open(storage).unwrap();
