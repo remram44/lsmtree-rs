@@ -367,9 +367,13 @@ impl<S: Storage> Database<S> {
         Ok(())
     }
 
-    pub fn iter_range(&mut self, key_start: &[u8], key_end: &[u8]) -> RangeIterator<S> {
+    pub fn iter_range<'a>(&'a mut self, key_start: &'a [u8], key_end: &'a [u8]) -> RangeIterator<'a, S> {
+        let iterator = self.mem_table.iter_range(key_start, key_end);
         RangeIterator {
-            database: self,
+            sstables: &self.sstables,
+            key_start,
+            key_end,
+            phase: RangeIteratorPhase::MemTable(iterator),
         }
     }
 
@@ -413,14 +417,46 @@ impl<S: Storage> Database<S> {
 }
 
 pub struct RangeIterator<'a, S: Storage> {
-    database: &'a mut Database<S>,
+    sstables: &'a [((u32, u32), SSTableReader<S::Reader>)],
+    key_start: &'a [u8],
+    key_end: &'a [u8],
+    phase: RangeIteratorPhase<'a, S::Reader>,
+}
+
+enum RangeIteratorPhase<'a, R: ReadAt> {
+    MemTable(mem_table::MemTableRangeIterator<'a>),
+    SSTable(usize, SSTableRangeIterator<'a, R>),
+    End,
 }
 
 impl<'a, S: Storage> Iterator for RangeIterator<'a, S> {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
-        todo!()
+        if let RangeIteratorPhase::MemTable(ref mut iterator) = self.phase {
+            if let Some(next) = iterator.next() {
+                return Some(next.clone());
+            } else if self.sstables.len() > 0 {
+                let iterator = self.sstables[0].1.iter_range(self.key_start, self.key_end);
+                self.phase = RangeIteratorPhase::SSTable(0, iterator);
+            } else {
+                self.phase = RangeIteratorPhase::End;
+                return None;
+            }
+        }
+        while let &mut RangeIteratorPhase::SSTable(mut table_index, ref mut iterator) = &mut self.phase {
+            if let Some(next) = iterator.next() {
+                return Some(next);
+            }
+            table_index += 1;
+            if table_index < self.sstables.len() {
+                let iterator = self.sstables[table_index].1.iter_range(self.key_start, self.key_end);
+                self.phase = RangeIteratorPhase::SSTable(table_index, iterator);
+            } else {
+                self.phase = RangeIteratorPhase::End;
+            }
+        }
+        None
     }
 }
 
