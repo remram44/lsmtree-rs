@@ -430,12 +430,12 @@ enum RangeIteratorPhase<'a, R: ReadAt> {
 }
 
 impl<'a, S: Storage> Iterator for RangeIterator<'a, S> {
-    type Item = (Vec<u8>, Vec<u8>);
+    type Item = Result<(Vec<u8>, Vec<u8>), IoError>;
 
-    fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
+    fn next(&mut self) -> Option<Result<(Vec<u8>, Vec<u8>), IoError>> {
         if let RangeIteratorPhase::MemTable(ref mut iterator) = self.phase {
             if let Some(next) = iterator.next() {
-                return Some(next.clone());
+                return Some(Ok(next.clone()));
             } else if self.sstables.len() > 0 {
                 let iterator = self.sstables[0].1.iter_range(self.key_start, self.key_end);
                 self.phase = RangeIteratorPhase::SSTable(0, iterator);
@@ -537,14 +537,14 @@ mod tests {
         assert_eq!(db.get(b"zzz").unwrap(), None);
 
         assert_eq!(
-            db.iter_range(b"def", b"jkl").collect::<Vec<_>>(),
+            db.iter_range(b"def", b"jkl").map(Result::unwrap).collect::<Vec<_>>(),
             vec![
                 (v(b"def"), v(b"777")),
             ],
         );
 
         assert_eq!(
-            db.iter_range(b"a", b"jz").collect::<Vec<_>>(),
+            db.iter_range(b"a", b"jz").map(Result::unwrap).collect::<Vec<_>>(),
             vec![
                 (v(b"abc"), v(b"222")),
                 (v(b"def"), v(b"777")),
@@ -553,7 +553,7 @@ mod tests {
         );
 
         assert_eq!(
-            db.iter_range(b"def", b"z").collect::<Vec<_>>(),
+            db.iter_range(b"def", b"z").map(Result::unwrap).collect::<Vec<_>>(),
             vec![
                 (v(b"def"), v(b"777")),
                 (v(b"jkl"), v(b"666")),
