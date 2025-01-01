@@ -105,27 +105,36 @@ impl<R: ReadAt> SSTableReader<R> {
         })
     }
 
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, IoError> {
-        // Binary search
+    fn get_offset(&self, entry_index: usize) -> Result<u64, IoError> {
+        let section_index = 4;
+
+        let mut buf = [0u8; 8];
+        self.file.read_exact_at(
+            &mut buf,
+            section_index + entry_index as u64 * 8,
+        )?;
+        Ok(read_u64(&buf))
+    }
+
+    // Binary search for a given key.
+    //
+    // If found, returns (key_offset, Some(value_offset)).
+    // If not found, returns (key_offset, None).
+    // Where *_offset is the offset in bytes in the entries file section.
+    fn binary_search(&self, key: &[u8]) -> Result<(u64, Option<u64>), IoError> {
         let mut size = self.size;
         if size == 0 {
-            return Ok(None);
+            return Ok((0, None));
         }
         let mut base = 0;
 
-        let section_index = 4;
         let section_entries = 4 + self.size as u64 * 8;
 
-        while size > 1 {
+        loop {
             let half = size / 2;
             let mid_index = base + half;
 
-            let mut mid_offset_buf = [0u8; 8];
-            self.file.read_exact_at(
-                &mut mid_offset_buf,
-                section_index + mid_index as u64 * 8,
-            )?;
-            let mid_offset = read_u64(&mid_offset_buf);
+            let mid_offset = self.get_offset(mid_index)?;
 
             let mut mid_key_len_buf = [0u8; 4];
             self.file.read_exact_at(
@@ -141,27 +150,39 @@ impl<R: ReadAt> SSTableReader<R> {
             )?;
 
             if &mid as &[u8] == key {
-                let mut value_len_buf = [0u8; 4];
-                self.file.read_exact_at(
-                    &mut value_len_buf,
-                    section_entries + mid_offset + 4 + mid_key_len as u64,
-                )?;
-                let value_len = read_u32(&value_len_buf);
-
-                let mut value = vec![0u8; value_len as usize];
-                self.file.read_exact_at(
-                    &mut value,
-                    section_entries + mid_offset + 4 + mid_key_len as u64 + 4,
-                )?;
-                return Ok(Some(value));
+                return Ok((mid_offset, Some(mid_offset + 4 + mid_key_len as u64)));
             } else if &mid as &[u8] < key {
                 base = mid_index;
             }
 
+            if size <= 1 {
+                return Ok((mid_offset, None));
+            }
+
             size -= half;
         }
+    }
 
-        Ok(None)
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, IoError> {
+        let section_entries = 4 + self.size as u64 * 8;
+
+        if let (_, Some(value_offset)) = self.binary_search(key)? {
+            let mut value_len_buf = [0u8; 4];
+            self.file.read_exact_at(
+                &mut value_len_buf,
+                section_entries + value_offset,
+            )?;
+            let value_len = read_u32(&value_len_buf);
+
+            let mut value = vec![0u8; value_len as usize];
+            self.file.read_exact_at(
+                &mut value,
+                section_entries + value_offset + 4,
+            )?;
+            return Ok(Some(value));
+        } else {
+            Ok(None)
+        }
     }
 }
 
